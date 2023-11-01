@@ -1,0 +1,66 @@
+commit 3f0b85db1d4eedd3fdc9db0832e114215812d15c
+Author: Miroslav Lichvar <mlichvar@redhat.com>
+Date:   Wed Jan 10 15:55:05 2018 +0100
+
+    don't remove timeout after each main context iteration
+    
+    With glib2-2.54.3 adding a new timeout causes g_main_context_iteration()
+    to immediately return FALSE, which triggered an infinite loop removing
+    and adding the timeout.
+    
+    Instead of removing the timeout after all iterations, use a flag to
+    remove the timeout only when a valid call was handled.
+    
+    This fixes issue #4.
+
+diff --git a/timedatex.c b/timedatex.c
+index 28e562c..e671bb5 100644
+--- a/timedatex.c
++++ b/timedatex.c
+@@ -120,7 +120,7 @@ struct hwclock_call {
+ 
+ /* Global variables */
+ static GDBusProxy *systemd_proxy, *polkit_proxy;
+-static gboolean main_quit, running_auth_checks;
++static gboolean main_quit, running_auth_checks, had_activity;
+ static GArray *ntp_units;
+ 
+ 
+@@ -948,6 +948,8 @@ static void handle_method_call(GDBusConnection *connection, const gchar *caller,
+ 	} else {
+ 		g_assert_not_reached();
+ 	}
++
++	had_activity = TRUE;
+ }
+ 
+ static const GDBusInterfaceVTable interface_vtable = {
+@@ -1022,19 +1024,24 @@ int main(int argc, char **argv) {
+ 	read_ntp_units();
+ 
+ 	main_quit = FALSE;
++	had_activity = FALSE;
+ 
+ 	/* This is the main loop. Quit when idle for QUIT_TIMEOUT seconds. */
+ 
+ 	while (!main_quit) {
+ 		/* Add timeout when not waiting for an authorization check */
+-		if (!running_auth_checks)
++		if (!timeout_id && !running_auth_checks)
+ 			timeout_id = g_timeout_add(QUIT_TIMEOUT * 1000, stop_main_loop, NULL);
+ 
+ 		g_main_context_iteration(g_main_context_default(), TRUE);
+ 
+-		if (timeout_id)
+-			g_source_remove(timeout_id);
+-		timeout_id = 0;
++		if (had_activity || running_auth_checks) {
++			had_activity = FALSE;
++
++			if (timeout_id)
++				g_source_remove(timeout_id);
++			timeout_id = 0;
++		}
+ 	}
+ 
+ 	ret = 0;
